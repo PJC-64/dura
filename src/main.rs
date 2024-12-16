@@ -56,6 +56,11 @@ async fn main() {
                 .short_flag('I')
                 .long_flag("info")
                 .about("Prints detailed information about the current configuration and repository status.")
+                .arg(
+                    arg!(-s --summary "Show summary output only")
+                        .required(false)
+                        .action(clap::builder::ArgAction::SetTrue)
+                )
         )
         .subcommand(
             Command::new("serve")
@@ -144,9 +149,13 @@ async fn main() {
                 }
             }
         }
-        Some(("info", _)) => {
+        Some(("info", arg_matches)) => {
             let config = Config::load();
-            config.print_detailed_info();
+            if arg_matches.get_flag("summary") {
+                config.print_summary();
+            } else {
+                config.print_detailed_info();
+            }
         }
         Some(("serve", arg_matches)) => {
             let env_filter =
