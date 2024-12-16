@@ -318,14 +318,39 @@ impl Config {
     }
 
     pub fn print_summary(&self) {
-        // Print overall status
+        println!("Dura Status Summary");
+        println!("-----------------");
+        
+        // Add server status at the top
+        let runtime_lock = RuntimeLock::load();
+        match runtime_lock.pid {
+            Some(pid) => {
+                let uptime = runtime_lock.start_time
+                    .and_then(|start| SystemTime::now().duration_since(start).ok())
+                    .map(|duration| {
+                        let days = duration.as_secs() / 86400;
+                        let hours = (duration.as_secs() % 86400) / 3600;
+                        let minutes = (duration.as_secs() % 3600) / 60;
+                        if days > 0 {
+                            format!("{}d {}h", days, hours)
+                        } else if hours > 0 {
+                            format!("{}h {}m", hours, minutes)
+                        } else {
+                            format!("{}m", minutes)
+                        }
+                    })
+                    .unwrap_or_else(|| "unknown time".to_string());
+                println!("Server: Running (PID: {}, Uptime: {})", pid, uptime);
+            },
+            None => println!("Server: Not running"),
+        }
+        println!();  // Add blank line before repository list
+        
+        // Rest of the existing summary code...
         let total_repos = self.repos.len();
         let mut total_backups = 0;
         let mut repos_with_changes = 0;
         let mut inaccessible_repos = 0;
-
-        println!("Dura Status Summary");
-        println!("-----------------");
         
         for (path, _) in &self.repos {
             let path = PathBuf::from(path);
