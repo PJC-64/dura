@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::process;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use tokio::time;
 use tracing::{debug, error, info, trace};
@@ -83,6 +83,7 @@ fn do_task(stats: &mut StatCollector, guard: &mut PollGuard) {
 pub async fn start() {
     let mut runtime_lock = RuntimeLock::load();
     runtime_lock.pid = Some(process::id());
+    runtime_lock.start_time = Some(SystemTime::now());
     runtime_lock.save();
     info!(pid = std::process::id());
 

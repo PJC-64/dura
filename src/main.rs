@@ -2,6 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{stdin, stdout, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::process;
+use std::fs;
 
 use clap::builder::IntoResettable;
 use clap::{
@@ -49,6 +50,12 @@ async fn main() {
                 .long_flag("capture")
                 .about("Run a single backup of an entire repository. This is the one single iteration of the `serve` control loop.")
                 .arg(arg_directory.clone())
+        )
+        .subcommand(
+            Command::new("info")
+                .short_flag('I')
+                .long_flag("info")
+                .about("Prints detailed information about the current configuration and repository status.")
         )
         .subcommand(
             Command::new("serve")
@@ -136,6 +143,10 @@ async fn main() {
                     process::exit(1);
                 }
             }
+        }
+        Some(("info", _)) => {
+            let config = Config::load();
+            config.print_detailed_info();
         }
         Some(("serve", arg_matches)) => {
             let env_filter =
@@ -239,12 +250,34 @@ fn watch_dir(path: &std::path::Path, watch_config: WatchConfig) {
 
 fn unwatch_dir(path: &std::path::Path) {
     let mut config = Config::load();
-    let path = path
-        .to_str()
-        .expect("The provided path is not valid unicode")
-        .to_string();
+    
+    // Try to canonicalize the path, if it fails (doesn't exist), use the original path
+    let path_str = match fs::canonicalize(path) {
+        Ok(canonical_path) => canonical_path
+            .to_str()
+            .expect("The provided path is not valid unicode")
+            .to_string(),
+        Err(_) => path
+            .to_str()
+            .expect("The provided path is not valid unicode")
+            .to_string(),
+    };
 
-    config.set_unwatch(path);
+    // Find non-existent paths
+    let removed_paths: Vec<String> = config.repos
+        .keys()
+        .filter(|p| !Path::new(p).exists())
+        .cloned()
+        .collect();
+
+    // Remove non-existent paths
+    for path in removed_paths {
+        config.repos.remove(&path);
+        println!("Removed non-existent path: {}", path);
+    }
+
+    // Handle the specifically requested path
+    config.set_unwatch(path_str);
     config.save();
 }
 

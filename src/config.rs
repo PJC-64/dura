@@ -4,10 +4,14 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::{env, fs};
+use std::time::SystemTime;
+use chrono::{DateTime, Local};
+use git2::Repository;
 
 use serde::{Deserialize, Serialize};
 
 use crate::git_repo_iter::GitRepoIter;
+use crate::database::RuntimeLock;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -161,5 +165,111 @@ impl Config {
 
     pub fn git_repos(&self) -> GitRepoIter {
         GitRepoIter::new(self)
+    }
+
+    pub fn print_detailed_info(&self) {
+        // Configuration File Info
+        println!("Dura Configuration");
+        println!("==================");
+        println!("Config file: {}", Self::default_path().display());
+        println!("Config directory: {}", Self::get_dura_config_home().display());
+        
+        // Server Status
+        println!("\nServer Status");
+        println!("-------------");
+        let runtime_lock = RuntimeLock::load();
+        match runtime_lock.pid {
+            Some(pid) => {
+                println!("Server is running (PID: {})", pid);
+                if let Some(start_time) = runtime_lock.start_time {
+                    if let Ok(duration) = SystemTime::now().duration_since(start_time) {
+                        let days = duration.as_secs() / 86400;
+                        let hours = (duration.as_secs() % 86400) / 3600;
+                        let minutes = (duration.as_secs() % 3600) / 60;
+                        let seconds = duration.as_secs() % 60;
+                        println!("Running for: {}d {}h {}m {}s", days, hours, minutes, seconds);
+                    }
+                }
+            },
+            None => println!("Server is not running"),
+        }
+        
+        // Commit Settings
+        println!("\nCommit Settings");
+        println!("--------------");
+        println!("Exclude Git Config: {}", self.commit_exclude_git_config);
+        println!("Author: {}", self.commit_author.as_deref().unwrap_or("Not set"));
+        println!("Email: {}", self.commit_email.as_deref().unwrap_or("Not set"));
+        
+        // Repository Status
+        println!("\nWatched Repositories");
+        println!("-------------------");
+        for (path, config) in &self.repos {
+            self.print_repo_status(path, config);
+        }
+    }
+
+    fn print_repo_status(&self, path: &str, config: &WatchConfig) {
+        println!("\n📁 {}", path);
+        
+        // Check if directory exists
+        let path = PathBuf::from(path);
+        if !path.exists() {
+            println!("  ⚠️  Directory not found!");
+            return;
+        }
+
+        // Check if it's a git repository
+        match Repository::open(&path) {
+            Ok(repo) => {
+                println!("  ✓ Valid Git repository");
+                
+                // Check for uncommitted changes
+                match repo.statuses(None) {
+                    Ok(statuses) => {
+                        if statuses.is_empty() {
+                            println!("  ✓ No uncommitted changes");
+                        } else {
+                            println!("  ⚠️  Has uncommitted changes");
+                        }
+                    }
+                    Err(_) => println!("  ⚠️  Unable to check repository status"),
+                }
+
+                // Get last backup time
+                if let Some(last_backup) = self.get_last_backup_time(&repo) {
+                    let datetime: DateTime<Local> = last_backup.into();
+                    println!("  🕒 Last backup: {}", datetime.format("%Y-%m-%d %H:%M:%S"));
+                } else {
+                    println!("  ℹ️ No backups found");
+                }
+            }
+            Err(_) => {
+                println!("  ⚠️  Not a Git repository");
+                return;
+            }
+        }
+
+        // Print watch configuration
+        println!("  Watch Configuration:");
+        if config.include.is_empty() {
+            println!("    Include: All files");
+        } else {
+            println!("    Include patterns: {:?}", config.include);
+        }
+        if !config.exclude.is_empty() {
+            println!("    Exclude patterns: {:?}", config.exclude);
+        }
+        println!("    Max depth: {}", config.max_depth);
+    }
+
+    fn get_last_backup_time(&self, repo: &Repository) -> Option<SystemTime> {
+        // Look for the most recent commit in the dura branch
+        if let Ok(dura_ref) = repo.find_reference("refs/heads/dura") {
+            if let Ok(commit) = dura_ref.peel_to_commit() {
+                return Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(commit.time().seconds() as u64));
+            }
+        }
+        None
     }
 }

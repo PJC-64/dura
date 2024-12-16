@@ -2,17 +2,19 @@ use std::fs::{create_dir_all, File};
 use std::io::Result;
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeLock {
     pub pid: Option<u32>,
+    pub start_time: Option<SystemTime>,
 }
 
 impl RuntimeLock {
     pub fn empty() -> Self {
-        Self { pid: None }
+        Self { pid: None, start_time: None }
     }
 
     pub fn default_path() -> PathBuf {
