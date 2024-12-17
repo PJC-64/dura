@@ -4,9 +4,10 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::{env, fs};
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration};
 use chrono::{DateTime, Local};
 use git2::Repository;
+use std::io::IsTerminal;
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +52,44 @@ pub struct Config {
 }
 
 impl Config {
+    const SYMBOLS_FANCY: [&'static str; 8] = ["✓", "📝", "❌", "⚠️", "ℹ️", "🕒", "📊", "📁"];
+    const SYMBOLS_PLAIN: [&'static str; 8] = ["[OK]", "[M]", "[X]", "!", "i", "@", "#", "*"];
+
+    fn get_symbols() -> &'static [&'static str; 8] {
+        // Check environment variable first (explicit override)
+        if std::env::var("DURA_PLAIN_TEXT").is_ok() {
+            return &Self::SYMBOLS_PLAIN;
+        }
+        
+        // Check if DURA_FANCY is set (explicit override)
+        if std::env::var("DURA_FANCY").is_ok() {
+            return &Self::SYMBOLS_FANCY;
+        }
+
+        // Auto-detect terminal capabilities
+        if !std::io::stdout().is_terminal() {
+            // Not a terminal (e.g., pipe or redirect)
+            return &Self::SYMBOLS_PLAIN;
+        }
+
+        // Check for NO_COLOR (standard for disabling color/unicode)
+        if std::env::var("NO_COLOR").is_ok() {
+            return &Self::SYMBOLS_PLAIN;
+        }
+
+        // Check TERM environment variable
+        if let Ok(term) = std::env::var("TERM") {
+            let term = term.to_lowercase();
+            if term == "dumb" || term == "vt100" || term.contains("linux") {
+                return &Self::SYMBOLS_PLAIN;
+            }
+        }
+
+        // Default to fancy if we couldn't determine otherwise
+        // Most modern terminals support Unicode
+        &Self::SYMBOLS_FANCY
+    }
+
     pub fn empty() -> Self {
         Self {
             commit_exclude_git_config: false,
@@ -167,157 +206,43 @@ impl Config {
         GitRepoIter::new(self)
     }
 
-    pub fn print_detailed_info(&self) {
-        // Configuration File Info
-        println!("Dura Configuration");
-        println!("==================");
-        println!("Config file: {}", Self::default_path().display());
-        println!("Config directory: {}", Self::get_dura_config_home().display());
+    fn count_backups(&self, repo: &Repository) -> (usize, Option<String>, i64) {
+        let mut backup_count = 0;
+        let mut latest_commit_id = None;
+        let mut latest_time = 0;
+
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(repo.path().parent().unwrap_or(repo.path()));
+        cmd.args(&["log", "--all", "--format=%H %s"]);
         
-        // Server Status
-        println!("\nServer Status");
-        println!("-------------");
-        let runtime_lock = RuntimeLock::load();
-        match runtime_lock.pid {
-            Some(pid) => {
-                println!("Server is running (PID: {})", pid);
-                if let Some(start_time) = runtime_lock.start_time {
-                    if let Ok(duration) = SystemTime::now().duration_since(start_time) {
-                        let days = duration.as_secs() / 86400;
-                        let hours = (duration.as_secs() % 86400) / 3600;
-                        let minutes = (duration.as_secs() % 3600) / 60;
-                        let seconds = duration.as_secs() % 60;
-                        println!("Running for: {}d {}h {}m {}s", days, hours, minutes, seconds);
-                    }
-                }
-            },
-            None => println!("Server is not running"),
-        }
-        
-        // Commit Settings
-        println!("\nCommit Settings");
-        println!("--------------");
-        println!("Exclude Git Config: {}", self.commit_exclude_git_config);
-        println!("Author: {}", self.commit_author.as_deref().unwrap_or("Not set"));
-        println!("Email: {}", self.commit_email.as_deref().unwrap_or("Not set"));
-        
-        // Repository Status
-        println!("\nWatched Repositories");
-        println!("-------------------");
-        for (path, config) in &self.repos {
-            self.print_repo_status(path, config);
-        }
-    }
-
-    fn print_repo_status(&self, path: &str, config: &WatchConfig) {
-        println!("\n📁 {}", path);
-        
-        // Check if directory exists
-        let path = PathBuf::from(path);
-        if !path.exists() {
-            println!("  ⚠️  Directory not found!");
-            return;
-        }
-
-        // Check if it's a git repository
-        match Repository::open(&path) {
-            Ok(repo) => {
-                println!("  ✓ Valid Git repository");
-                
-                // Check for uncommitted changes with more specific options
-                match repo.statuses(Some(git2::StatusOptions::new()
-                    .include_untracked(true)
-                    .include_ignored(false)
-                    .include_unmodified(false)
-                    .renames_head_to_index(true)
-                    .recurse_untracked_dirs(true))) 
-                {
-                    Ok(statuses) => {
-                        let mut has_changes = false;
-                        for entry in statuses.iter() {
-                            let status = entry.status();
-                            if status.is_wt_new() || 
-                               status.is_wt_modified() || 
-                               status.is_wt_deleted() ||
-                               status.is_index_new() ||
-                               status.is_index_modified() ||
-                               status.is_index_deleted() {
-                                // Print what kind of change was detected for debugging
-                                if let Some(path) = entry.path() {
-                                    println!("  📝 Change detected: {} ({:?})", path, status);
-                                }
-                                has_changes = true;
-                            }
-                        }
-
-                        if has_changes {
-                            println!("  ⚠️  Has uncommitted changes");
-                        } else {
-                            println!("  ✓ No uncommitted changes");
-                        }
-                    }
-                    Err(e) => println!("  ⚠️  Unable to check repository status: {}", e),
-                }
-
-                // Check for dura backup branches
-                let mut latest_backup = None;
-                let mut backup_count = 0;
-
-                if let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) {
-                    for branch_result in branches {
-                        if let Ok((branch, _)) = branch_result {
-                            if let Ok(Some(name)) = branch.name() {
-                                if name.starts_with("dura/") {
-                                    backup_count += 1;
-                                    if let Ok(commit) = branch.get().peel_to_commit() {
-                                        match latest_backup {
-                                            None => latest_backup = Some(commit),
-                                            Some(ref latest) => {
-                                                if commit.time().seconds() > latest.time().seconds() {
-                                                    latest_backup = Some(commit);
-                                                }
-                                            }
-                                        }
+        if let Ok(output) = cmd.output() {
+            if let Ok(output_str) = String::from_utf8(output.stdout) {
+                for line in output_str.lines() {
+                    if line.ends_with("dura auto-backup") {
+                        backup_count += 1;
+                        if let Some(hash) = line.split_whitespace().next() {
+                            if let Ok(oid) = git2::Oid::from_str(hash) {
+                                if let Ok(commit) = repo.find_commit(oid) {
+                                    let commit_time = commit.time().seconds();
+                                    if commit_time > latest_time {
+                                        latest_time = commit_time;
+                                        latest_commit_id = Some(oid.to_string());
                                     }
                                 }
                             }
                         }
                     }
                 }
-
-                match latest_backup {
-                    Some(commit) => {
-                        let time = SystemTime::UNIX_EPOCH + 
-                                 std::time::Duration::from_secs(commit.time().seconds() as u64);
-                        let datetime: DateTime<Local> = time.into();
-                        println!("  🕒 Last backup: {} ({})", 
-                               datetime.format("%Y-%m-%d %H:%M:%S"),
-                               commit.id());
-                        println!("  📊 Total backups: {}", backup_count);
-                    }
-                    None => println!("  ℹ️ No dura backups found"),
-                }
-            }
-            Err(e) => {
-                println!("  ⚠️  Not a Git repository: {}", e);
-                return;
             }
         }
-
-        // Print watch configuration
-        println!("  Watch Configuration:");
-        if config.include.is_empty() {
-            println!("    Include: All files");
-        } else {
-            println!("    Include patterns: {:?}", config.include);
-        }
-        if !config.exclude.is_empty() {
-            println!("    Exclude patterns: {:?}", config.exclude);
-        }
-        println!("    Max depth: {}", config.max_depth);
+        
+        (backup_count, latest_commit_id, latest_time)
     }
 
     pub fn print_summary(&self) {
+        let symbols = Self::get_symbols();
+        let [ok, modified, error, _warning, _info, _time, _stats, _folder] = symbols;
+
         println!("Dura Status Summary");
         println!("-----------------");
         
@@ -344,27 +269,23 @@ impl Config {
             },
             None => println!("Server: Not running"),
         }
-        println!();  // Add blank line before repository list
-        
-        // Rest of the existing summary code...
+        println!();
+
         let total_repos = self.repos.len();
         let mut total_backups = 0;
         let mut repos_with_changes = 0;
         let mut inaccessible_repos = 0;
-        
-        for (path, _) in &self.repos {
+
+        for (path, _config) in &self.repos {
             let path = PathBuf::from(path);
             if !path.exists() {
                 inaccessible_repos += 1;
-                println!("❌ {}: Not found", path.display());
+                println!("{} {}: Not found", error, path.display());
                 continue;
             }
 
             match Repository::open(&path) {
                 Ok(repo) => {
-                    let mut status_str = String::new();
-                    
-                    // Check for changes
                     let has_changes = repo.statuses(Some(git2::StatusOptions::new()
                         .include_untracked(true)
                         .include_ignored(false)
@@ -374,40 +295,17 @@ impl Config {
                     
                     if has_changes {
                         repos_with_changes += 1;
-                        status_str.push_str("📝 ");
                     }
 
-                    // Get latest backup commit and count
-                    let mut backup_count = 0;
-                    let mut latest_commit_id = None;
-                    if let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) {
-                        let mut latest_time = 0;
-                        for branch_result in branches {
-                            if let Ok((branch, _)) = branch_result {
-                                if let Ok(Some(name)) = branch.name() {
-                                    if name.starts_with("dura/") {
-                                        backup_count += 1;
-                                        if let Ok(commit) = branch.get().peel_to_commit() {
-                                            let commit_time = commit.time().seconds();
-                                            if commit_time > latest_time {
-                                                latest_time = commit_time;
-                                                latest_commit_id = Some(commit.id().to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let (backup_count, latest_commit_id, _) = self.count_backups(&repo);
                     total_backups += backup_count;
                     
-                    // Print repo summary with short commit id if available
                     let commit_info = latest_commit_id
                         .map(|id| format!(" [{}]", &id[..7]))
                         .unwrap_or_default();
                     
                     println!("{}{}: {} backups{}{}", 
-                        if has_changes { "📝" } else { "✓" },
+                        if has_changes { modified } else { ok },
                         path.display(),
                         backup_count,
                         commit_info,
@@ -416,12 +314,11 @@ impl Config {
                 }
                 Err(_) => {
                     inaccessible_repos += 1;
-                    println!("❌ {}: Not a git repository", path.display());
+                    println!("{} {}: Not a git repository", error, path.display());
                 }
             }
         }
 
-        // Print overall summary
         println!("\nOverall Status:");
         println!("Watching {} repositories ({} accessible)", 
                 total_repos, 
@@ -432,6 +329,88 @@ impl Config {
         }
         if inaccessible_repos > 0 {
             println!("Inaccessible repositories: {}", inaccessible_repos);
+        }
+    }
+
+    pub fn print_detailed_info(&self) {
+        let symbols = Self::get_symbols();
+        let [ok, modified, error, warning, info, time, stats, folder] = symbols;
+
+        for (path, config) in &self.repos {
+            let path = PathBuf::from(path);
+            println!("{} {}", folder, path.display());
+
+            if !path.exists() {
+                println!("  {} Path does not exist", error);
+                continue;
+            }
+
+            match Repository::open(&path) {
+                Ok(repo) => {
+                    println!("  {} Valid Git repository", ok);
+                    
+                    match repo.statuses(Some(git2::StatusOptions::new()
+                        .include_untracked(true)
+                        .include_ignored(false)
+                        .include_unmodified(false))) 
+                    {
+                        Ok(statuses) => {
+                            let mut has_changes = false;
+                            for entry in statuses.iter() {
+                                let status = entry.status();
+                                if status.is_wt_new() || 
+                                   status.is_wt_modified() || 
+                                   status.is_wt_deleted() ||
+                                   status.is_index_new() ||
+                                   status.is_index_modified() ||
+                                   status.is_index_deleted() {
+                                    if let Some(path) = entry.path() {
+                                        println!("  {} Change detected: {} ({:?})", 
+                                               modified, path, status);
+                                    }
+                                    has_changes = true;
+                                }
+                            }
+
+                            if has_changes {
+                                println!("  {} Has uncommitted changes", warning);
+                            } else {
+                                println!("  {} No uncommitted changes", ok);
+                            }
+                        }
+                        Err(e) => println!("  {} Unable to check repository status: {}", 
+                                         warning, e),
+                    }
+
+                    let (backup_count, latest_commit_id, latest_time) = self.count_backups(&repo);
+                    if backup_count > 0 {
+                        if let Some(id) = latest_commit_id {
+                            let time_sys = SystemTime::UNIX_EPOCH + 
+                                     Duration::from_secs(latest_time as u64);
+                            let datetime: DateTime<Local> = time_sys.into();
+                            println!("  {} Last backup: {} ({})", 
+                                   time,
+                                   datetime.format("%Y-%m-%d %H:%M:%S"),
+                                   &id[..7]);
+                        }
+                        println!("  {} Total backups: {}", stats, backup_count);
+                    } else {
+                        println!("  {} No backups found", info);
+                    }
+
+                    // Print watch configuration
+                    println!("  Watch Configuration:");
+                    if config.include.is_empty() {
+                        println!("    Include: All files");
+                    } else {
+                        println!("    Include: {:?}", config.include);
+                    }
+                    println!("    Max depth: {}\n", config.max_depth);
+                }
+                Err(e) => {
+                    println!("  {} Not a valid git repository: {}\n", error, e);
+                }
+            }
         }
     }
 }
