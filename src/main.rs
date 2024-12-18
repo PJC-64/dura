@@ -55,9 +55,9 @@ async fn main() {
             Command::new("info")
                 .short_flag('I')
                 .long_flag("info")
-                .about("Prints detailed information about the current configuration and repository status.")
+                .about("Prints summary information about the current configuration and repository status.")
                 .arg(
-                    arg!(-s --summary "Show summary output only")
+                    arg!(-d --detail "Show detailed output")
                         .required(false)
                         .action(clap::builder::ArgAction::SetTrue)
                 )
@@ -151,10 +151,10 @@ async fn main() {
         }
         Some(("info", arg_matches)) => {
             let config = Config::load();
-            if arg_matches.get_flag("summary") {
-                config.print_summary();
-            } else {
+            if arg_matches.get_flag("detail"){
                 config.print_detailed_info();
+            } else {
+                config.print_summary();
             }
         }
         Some(("serve", arg_matches)) => {
@@ -259,7 +259,7 @@ fn watch_dir(path: &std::path::Path, watch_config: WatchConfig) {
 
 fn unwatch_dir(path: &std::path::Path) {
     let mut config = Config::load();
-    
+
     // Try to canonicalize the path, if it fails (doesn't exist), use the original path
     let path_str = match fs::canonicalize(path) {
         Ok(canonical_path) => canonical_path

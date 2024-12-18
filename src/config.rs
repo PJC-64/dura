@@ -244,7 +244,7 @@ impl Config {
         let [ok, modified, error, _warning, _info, _time, _stats, _folder] = symbols;
 
         println!("Dura Status Summary");
-        println!("-----------------");
+        println!("-------------------");
         
         // Add server status at the top
         let runtime_lock = RuntimeLock::load();
@@ -297,18 +297,28 @@ impl Config {
                         repos_with_changes += 1;
                     }
 
-                    let (backup_count, latest_commit_id, _) = self.count_backups(&repo);
+                    let (backup_count, latest_commit_id, latest_time) = self.count_backups(&repo);
                     total_backups += backup_count;
                     
                     let commit_info = latest_commit_id
                         .map(|id| format!(" [{}]", &id[..7]))
                         .unwrap_or_default();
                     
-                    println!("{}{}: {} backups{}{}", 
+                    let time_info = if latest_time > 0 {
+                        let time = SystemTime::UNIX_EPOCH + 
+                                 Duration::from_secs(latest_time as u64);
+                        let datetime: DateTime<Local> = time.into();
+                        format!(" @ {}", datetime.format("%Y%m%d-%H%M%S"))
+                    } else {
+                        String::new()
+                    };
+                    
+                    println!("{}{}: {} backups{}{}{}", 
                         if has_changes { modified } else { ok },
                         path.display(),
                         backup_count,
                         commit_info,
+                        time_info,
                         if has_changes { " (uncommitted changes)" } else { "" }
                     );
                 }
